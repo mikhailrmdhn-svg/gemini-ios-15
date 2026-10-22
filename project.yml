@@ -1,0 +1,27 @@
+name: GeminiLite
+options:
+  bundleIdPrefix: com.custom
+  deploymentTarget:
+    iOS: "15.0"
+targets:
+  GeminiLite:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - App.swift
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Gemini
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities: [arm64]
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
