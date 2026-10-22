@@ -2,36 +2,138 @@ name: Build Gemini IPA
 
 on:
   push:
-    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-14
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Generate Xcode Project
+      - name: Compile Gemini IPA Langsung
         run: |
-          brew install xcodegen
-          xcodegen generate
+          mkdir -p Payload/GeminiLite.app
 
-      - name: Build Unsigned App
-        run: |
-          xcodebuild -project GeminiLite.xcodeproj \
-            -scheme GeminiLite \
-            -configuration Release \
-            -sdk iphoneos \
-            -derivedDataPath build \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+          cat << 'EOF' > App.swift
+          import UIKit
+          import WebKit
 
-      - name: Package IPA
-        run: |
-          mkdir Payload
-          cp -r build/Build/Products/Release-iphoneos/GeminiLite.app Payload/
+          @main
+          class AppDelegate: UIResponder, UIApplicationDelegate {
+              var window: UIWindow?
+
+              func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+                  window = UIWindow(frame: UIScreen.main.bounds)
+                  window?.rootViewController = GeminiViewController()
+                  window?.makeKeyAndVisible()
+                  return true
+              }
+          }
+
+          class GeminiViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
+              var webView: WKWebView!
+
+              override func viewDidLoad() {
+                  super.viewDidLoad()
+                  let bg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1.0)
+                  view.backgroundColor = bg
+
+                  let config = WKWebViewConfiguration()
+                  config.websiteDataStore = WKWebsiteDataStore.default()
+                  config.allowsInlineMediaPlayback = true
+
+                  webView = WKWebView(frame: .zero, configuration: config)
+                  webView.navigationDelegate = self
+                  webView.uiDelegate = self
+                  webView.allowsBackForwardNavigationGestures = true
+                  webView.isOpaque = false
+                  webView.backgroundColor = bg
+                  webView.scrollView.backgroundColor = bg
+
+                  webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 15_8 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6 Mobile/15E148 Safari/604.1"
+
+                  view.addSubview(webView)
+                  webView.translatesAutoresizingMaskIntoConstraints = false
+                  NSLayoutConstraint.activate([
+                      webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+                      webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+                      webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                      webView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+                  ])
+
+                  if let url = URL(string: "https://gemini.google.com/app") {
+                      webView.load(URLRequest(url: url))
+                  }
+              }
+
+              func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+                  if navigationAction.targetFrame == nil {
+                      webView.load(navigationAction.request)
+                  }
+                  return nil
+              }
+          }
+          EOF
+
+          cat << 'EOF' > Payload/GeminiLite.app/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDisplayName</key>
+              <string>Gemini</string>
+              <key>CFBundleExecutable</key>
+              <string>GeminiLite</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.custom.geminilite</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>GeminiLite</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.0</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>MinimumOSVersion</key>
+              <string>15.0</string>
+              <key>UIDeviceFamily</key>
+              <array>
+                  <integer>1</integer>
+                  <integer>2</integer>
+              </array>
+              <key>UILaunchScreen</key>
+              <dict/>
+              <key>UIRequiredDeviceCapabilities</key>
+              <array>
+                  <string>arm64</string>
+              </array>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+              <key>UISupportedInterfaceOrientations~ipad</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationPortraitUpsideDown</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+          </dict>
+          </plist>
+          EOF
+
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos swiftc -parse-as-library App.swift \
+            -target arm64-apple-ios15.0 \
+            -sdk "$SDK_PATH" \
+            -framework UIKit -framework WebKit \
+            -O -o Payload/GeminiLite.app/GeminiLite
+
+          codesign --force --sign "-" --timestamp=none Payload/GeminiLite.app
           zip -r GeminiLite-iOS15.ipa Payload
 
       - name: Upload IPA Artifact
