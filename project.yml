@@ -1,27 +1,217 @@
-name: GeminiLite
-options:
-  bundleIdPrefix: com.custom
-  deploymentTarget:
-    iOS: "15.0"
-targets:
-  GeminiLite:
-    type: application
-    platform: iOS
-    deploymentTarget: "15.0"
-    sources:
-      - App.swift
-    info:
-      path: Info.plist
-      properties:
-        CFBundleDisplayName: Gemini
-        UILaunchScreen: {}
-        UIRequiredDeviceCapabilities: [arm64]
-        UISupportedInterfaceOrientations:
-          - UIInterfaceOrientationPortrait
-          - UIInterfaceOrientationLandscapeLeft
-          - UIInterfaceOrientationLandscapeRight
-        UISupportedInterfaceOrientations~ipad:
-          - UIInterfaceOrientationPortrait
-          - UIInterfaceOrientationPortraitUpsideDown
-          - UIInterfaceOrientationLandscapeLeft
-          - UIInterfaceOrientationLandscapeRight
+name: Build Gemini LowRAM IPA
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Compile Gemini Low-RAM IPA
+        run: |
+          mkdir -p Payload/GeminiLite.app
+
+          cat << 'EOF' > App.swift
+          import UIKit
+          import WebKit
+
+          @main
+          class AppDelegate: UIResponder, UIApplicationDelegate {
+              var window: UIWindow?
+
+              func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+                  // Bersihkan cache sampah saat aplikasi baru dibuka (tanpa hapus login)
+                  cleanVolatileCache()
+                  
+                  window = UIWindow(frame: UIScreen.main.bounds)
+                  window?.rootViewController = GeminiViewController()
+                  window?.makeKeyAndVisible()
+                  return true
+              }
+
+              func applicationDidReceiveMemoryWarning(_ application: UIApplication) {
+                  cleanVolatileCache()
+              }
+
+              func applicationDidEnterBackground(_ application: UIApplication) {
+                  cleanVolatileCache()
+              }
+
+              func cleanVolatileCache() {
+                  // Hanya hapus cache memori dan disk sementara, biarkan Cookies & Session Google aman
+                  let volatileTypes: Set<String> = [
+                      WKWebsiteDataTypeMemoryCache,
+                      WKWebsiteDataTypeDiskCache,
+                      WKWebsiteDataTypeOfflineWebApplicationCache
+                  ]
+                  WKWebsiteDataStore.default().removeData(
+                      ofTypes: volatileTypes,
+                      modifiedSince: Date(timeIntervalSince1970: 0)
+                  ) {}
+                  URLCache.shared.removeAllCachedResponses()
+              }
+          }
+
+          class GeminiViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
+              var webView: WKWebView!
+
+              override func viewDidLoad() {
+                  super.viewDidLoad()
+                  let darkBg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1.0)
+                  view.backgroundColor = darkBg
+
+                  // Batasi cache URL di RAM menjadi sangat kecil (4 MB)
+                  URLCache.shared.memoryCapacity = 4 * 1024 * 1024
+                  URLCache.shared.diskCapacity = 16 * 1024 * 1024
+
+                  let contentController = WKUserContentController()
+
+                  // Script optimasi RAM: matikan efek blur berat & rapikan rendering tanpa merusak fitur baru
+                  let lowRamJS = """
+                  (function() {
+                      const style = document.createElement('style');
+                      style.innerHTML = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }';
+                      document.documentElement.appendChild(style);
+                  })();
+                  """
+                  let userScript = WKUserScript(source: lowRamJS, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+                  contentController.addUserScript(userScript)
+
+                  let config = WKWebViewConfiguration()
+                  config.userContentController = contentController
+                  config.websiteDataStore = WKWebsiteDataStore.default()
+                  config.processPool = WKProcessPool()
+                  config.allowsInlineMediaPlayback = true
+                  config.suppressesIncrementalRendering = false
+                  config.dataDetectorTypes = [] // Hemat RAM saat chat panjang
+
+                  if #available(iOS 14.0, *) {
+                      config.defaultWebpagePreferences.allowsContentJavaScript = true
+                      config.defaultWebpagePreferences.preferredContentMode = .mobile
+                  }
+
+                  webView = WKWebView(frame: .zero, configuration: config)
+                  webView.navigationDelegate = self
+                  webView.uiDelegate = self
+                  webView.allowsBackForwardNavigationGestures = true
+                  webView.allowsLinkPreview = false // Matikan preview berat di RAM
+                  webView.isOpaque = true
+                  webView.backgroundColor = darkBg
+                  webView.scrollView.backgroundColor = darkBg
+                  webView.scrollView.keyboardDismissMode = .interactive
+
+                  // User-Agent Mozilla Android (gaya Raynard Browser) agar semua elemen web baru kebaca & lolos Google OAuth
+                  webView.customUserAgent = "Mozilla/5.0 (Android 14; Mobile; rv:131.0) Gecko/131.0 Firefox/131.0"
+
+                  view.addSubview(webView)
+                  webView.translatesAutoresizingMaskIntoConstraints = false
+                  NSLayoutConstraint.activate([
+                      webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+                      webView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+                      webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                      webView.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+                  ])
+
+                  if let url = URL(string: "https://gemini.google.com/app") {
+                      var request = URLRequest(url: url)
+                      request.cachePolicy = .useProtocolCachePolicy
+                      webView.load(request)
+                  }
+              }
+
+              // Tangani popup login Google atau link eksternal di dalam WebView yang sama (hemat RAM tab baru)
+              func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+                  if navigationAction.targetFrame == nil {
+                      webView.load(navigationAction.request)
+                  }
+                  return nil
+              }
+
+              // Izinkan fitur Mikrofon / Voice Gemini di iOS 15+ tanpa prompt berulang
+              @available(iOS 15.0, *)
+              func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin, initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType, decisionHandler: @escaping (WKPermissionDecision) -> Void) {
+                  decisionHandler(.grant)
+              }
+
+              // Bersihkan memori saat proses WebKit crash karena kehabisan RAM sistem
+              func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+                  webView.reload()
+              }
+          }
+          EOF
+
+          cat << 'EOF' > Payload/GeminiLite.app/Info.plist
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDisplayName</key>
+              <string>Gemini</string>
+              <key>CFBundleExecutable</key>
+              <string>GeminiLite</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.custom.geminilite</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>GeminiLite</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>1.1</string>
+              <key>CFBundleVersion</key>
+              <string>2</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>MinimumOSVersion</key>
+              <string>15.0</string>
+              <key>NSMicrophoneUsageDescription</key>
+              <string>Digunakan untuk fitur input suara dan Gemini Live.</string>
+              <key>NSCameraUsageDescription</key>
+              <string>Digunakan untuk mengambil foto langsung ke dalam chat Gemini.</string>
+              <key>NSPhotoLibraryUsageDescription</key>
+              <string>Digunakan untuk mengunggah gambar dan dokumen ke Gemini.</string>
+              <key>UIDeviceFamily</key>
+              <array>
+                  <integer>1</integer>
+                  <integer>2</integer>
+              </array>
+              <key>UILaunchScreen</key>
+              <dict/>
+              <key>UIRequiredDeviceCapabilities</key>
+              <array>
+                  <string>arm64</string>
+              </array>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+              <key>UISupportedInterfaceOrientations~ipad</key>
+              <array>
+                  <string>UIInterfaceOrientationPortrait</string>
+                  <string>UIInterfaceOrientationPortraitUpsideDown</string>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+          </dict>
+          </plist>
+          EOF
+
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos swiftc -parse-as-library App.swift \
+            -target arm64-apple-ios15.0 \
+            -sdk "$SDK_PATH" \
+            -framework UIKit -framework WebKit \
+            -Osize -o Payload/GeminiLite.app/GeminiLite
+
+          codesign --force --sign "-" --timestamp=none Payload/GeminiLite.app
+          zip -r GeminiLite-iOS15.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeminiLite-LowRAM-IPA
+          path: GeminiLite-iOS15.ipa
